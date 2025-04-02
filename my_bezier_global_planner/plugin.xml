@@ -1,0 +1,7 @@
+<library path="lib/libmy_bezier_global_planner">
+  <class name="my_bezier_global_planner/MyBezierGlobalPlanner"
+         type="my_bezier_global_planner::MyBezierGlobalPlanner"
+         base_class_type="nav_core::BaseGlobalPlanner">
+    <description>A Bezier curve-based global planner.</description>
+  </class>
+</library>
