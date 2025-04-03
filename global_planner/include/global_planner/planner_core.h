@@ -92,6 +92,8 @@ class GlobalPlanner : public nav_core::BaseGlobalPlanner {
 
         void initialize(std::string name, costmap_2d::Costmap2D* costmap, std::string frame_id);
 
+        void smoothPathWithBezier(std::vector<geometry_msgs::PoseStamped>& path, int span_bezier = 5, float dt = 0.1);
+
         /**
          * @brief Given a goal pose in the world, compute a plan
          * @param start The start pose
@@ -174,6 +176,8 @@ class GlobalPlanner : public nav_core::BaseGlobalPlanner {
         bool initialized_, allow_unknown_;
 
     private:
+        float fac(int x); // 阶乘函数声明
+
         void mapToWorld(double mx, double my, double& wx, double& wy);
         bool worldToMap(double wx, double wy, double& mx, double& my);
         void clearRobotCell(const geometry_msgs::PoseStamped& global_pose, unsigned int mx, unsigned int my);

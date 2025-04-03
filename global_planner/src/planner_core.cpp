@@ -51,6 +51,127 @@ PLUGINLIB_EXPORT_CLASS(global_planner::GlobalPlanner, nav_core::BaseGlobalPlanne
 
 namespace global_planner {
 
+// compute bezier curve
+geometry_msgs::PoseStamped calculateBezierPoint(double t,
+    const geometry_msgs::PoseStamped& p0,
+    const geometry_msgs::PoseStamped& p1,
+    const geometry_msgs::PoseStamped& p2,
+    const geometry_msgs::PoseStamped& p3) {
+    geometry_msgs::PoseStamped result;
+    double t2 = t * t;
+    double t3 = t2 * t;
+    double mt = 1 - t;
+    double mt2 = mt * mt;
+    double mt3 = mt2 * mt;
+
+    // B(t) = (1-t)^3*P0 + 3*(1-t)^2*t*P1 + 3*(1-t)*t^2*P2 + t^3*P3
+    result.pose.position.x = mt3 * p0.pose.position.x +
+                             3 * mt2 * t * p1.pose.position.x +
+                             3 * mt * t2 * p2.pose.position.x +
+                             t3 * p3.pose.position.x;
+    result.pose.position.y = mt3 * p0.pose.position.y +
+                             3 * mt2 * t * p1.pose.position.y +
+                             3 * mt * t2 * p2.pose.position.y +
+                             t3 * p3.pose.position.y;
+    result.pose.position.z = 0.0; // 2d
+
+    // 简单设置为默认朝向
+    result.pose.orientation = p0.pose.orientation;
+    result.header.frame_id = p0.header.frame_id;
+    result.header.stamp = p0.header.stamp;
+
+    return result;
+}
+
+float GlobalPlanner::fac(int x) {
+    float f = 1;
+    for (int i = 2; i <= x; i++) {
+        f *= i;
+    }
+    return f;
+}
+
+
+void GlobalPlanner::smoothPathWithBezier(std::vector<geometry_msgs::PoseStamped>& path, int span_bezier, float dt) {
+    if (path.size() < 6) {
+        ROS_WARN("Path has fewer than 6 points, skipping Bezier smoothing.");
+        return;
+    }
+
+    std::vector<geometry_msgs::PoseStamped> path_bezier;
+    path_bezier.reserve(path.size() * 10); // 预分配空间，每个段生成约10个点
+
+    int count_bezier = 0;
+    const int n = path.size() - 1;
+    const int length_bezier = 5; // 固定为5阶贝塞尔曲线
+
+    // 主循环：分段生成5阶贝塞尔曲线
+    while (count_bezier < n - 10 * span_bezier) {
+        for (float t = 0.0; t <= 1.0; t += dt) {
+            geometry_msgs::PoseStamped point_bezier;
+            point_bezier.header.frame_id = frame_id_;
+            point_bezier.header.stamp = path[count_bezier].header.stamp;
+            point_bezier.pose.position.x = 0.0;
+            point_bezier.pose.position.y = 0.0;
+            point_bezier.pose.position.z = 0.0;
+            point_bezier.pose.orientation = path[count_bezier].pose.orientation; // 默认继承起点朝向
+
+            // 计算5阶贝塞尔曲线点
+            for (int i = 0; i <= length_bezier; i++) {
+                double k = fac(length_bezier) / (fac(i) * fac(length_bezier - i)) *
+                           pow(t, i) * pow(1 - t, length_bezier - i);
+                int idx = count_bezier + i * span_bezier;
+                point_bezier.pose.position.x += k * path[idx].pose.position.x;
+                point_bezier.pose.position.y += k * path[idx].pose.position.y;
+            }
+            path_bezier.push_back(point_bezier);
+        }
+        count_bezier += length_bezier * span_bezier;
+    }
+
+    while (count_bezier < n) {
+        count_bezier++;
+        path_bezier.push_back(path[count_bezier]);
+    }
+
+    path.clear();
+    path = std::move(path_bezier);
+}
+
+//void GlobalPlanner::smoothPathWithBezier(std::vector<geometry_msgs::PoseStamped>& path, int num_points) {
+//    if (path.size() < 4) {
+//        ROS_WARN("Path has fewer than 4 points, skipping Bezier smoothing.");
+//        return;
+//    }
+//
+//    std::vector<geometry_msgs::PoseStamped> smoothed_path;
+//    smoothed_path.reserve((path.size() - 1) * num_points);
+//
+//    // 每四个点一组进行三次贝塞尔曲线平滑
+//    for (size_t i = 0; i < path.size() - 3; i += 3) {
+//        const auto& p0 = path[i];
+//        const auto& p1 = path[i + 1];
+//        const auto& p2 = path[i + 2];
+//        const auto& p3 = path[i + 3];
+//
+//        // 在每个段内生成 num_points 个点
+//        for (int j = 0; j < num_points; ++j) {
+//            double t = static_cast<double>(j) / (num_points - 1);
+//            geometry_msgs::PoseStamped point = calculateBezierPoint(t, p0, p1, p2, p3);
+//            smoothed_path.push_back(point);
+//        }
+//    }
+
+//    // solve the left points（add them to smoothed_path directly）
+//    if (path.size() % 3 != 1) {
+//        for (size_t i = (path.size() - 4) - (path.size() - 4) % 3 + 3; i < path.size(); ++i) {
+//            smoothed_path.push_back(path[i]);
+//        }
+//    }
+//
+//    path = std::move(smoothed_path);
+//}
+
 void GlobalPlanner::outlineMap(unsigned char* costarr, int nx, int ny, unsigned char value) {
     unsigned char* pc = costarr;
     for (int i = 0; i < nx; i++)
@@ -305,6 +426,8 @@ bool GlobalPlanner::makePlan(const geometry_msgs::PoseStamped& start, const geom
             geometry_msgs::PoseStamped goal_copy = goal;
             goal_copy.header.stamp = ros::Time::now();
             plan.push_back(goal_copy);
+
+            smoothPathWithBezier(plan, 5, 0.1);
         } else {
             ROS_ERROR("Failed to get a plan from potential when a legal potential was found. This shouldn't happen.");
         }
