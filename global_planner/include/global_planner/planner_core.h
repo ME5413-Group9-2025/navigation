@@ -52,6 +52,8 @@
 #include <global_planner/traceback.h>
 #include <global_planner/orientation_filter.h>
 #include <global_planner/GlobalPlannerConfig.h>
+// SG filter
+#include <global_planner/savitzky_golay_smoother.h>
 
 namespace global_planner {
 
@@ -161,7 +163,7 @@ class GlobalPlanner : public nav_core::BaseGlobalPlanner {
         /**
          * @brief  Publish a path for visualization purposes
          */
-        void publishPlan(const std::vector<geometry_msgs::PoseStamped>& path);
+        void publishPlan(const std::vector<geometry_msgs::PoseStamped>& path, bool is_raw = false);
 
         bool makePlanService(nav_msgs::GetPlan::Request& req, nav_msgs::GetPlan::Response& resp);
 
@@ -172,11 +174,19 @@ class GlobalPlanner : public nav_core::BaseGlobalPlanner {
          */
         costmap_2d::Costmap2D* costmap_;
         std::string frame_id_;
-        ros::Publisher plan_pub_;
+        ros::Publisher raw_plan_pub_; // raw plan release
+        ros::Publisher plan_pub_; // smooth plan
         bool initialized_, allow_unknown_;
 
     private:
-        float fac(int x); // 阶乘函数声明
+        enum PlanType { RAW_PLAN = 0, PLAN = 1 };
+        float fac(int x);
+
+        //SG filter using
+        nav2_smoother::SavitzkyGolaySmoother sg_smoother_;
+        bool use_sg_smoothing_;
+        double sg_max_time_;
+
 
         void mapToWorld(double mx, double my, double& wx, double& wy);
         bool worldToMap(double wx, double wy, double& mx, double& my);

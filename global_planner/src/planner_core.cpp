@@ -75,7 +75,7 @@ geometry_msgs::PoseStamped calculateBezierPoint(double t,
                              t3 * p3.pose.position.y;
     result.pose.position.z = 0.0; // 2d
 
-    // 简单设置为默认朝向
+
     result.pose.orientation = p0.pose.orientation;
     result.header.frame_id = p0.header.frame_id;
     result.header.stamp = p0.header.stamp;
@@ -99,13 +99,12 @@ void GlobalPlanner::smoothPathWithBezier(std::vector<geometry_msgs::PoseStamped>
     }
 
     std::vector<geometry_msgs::PoseStamped> path_bezier;
-    path_bezier.reserve(path.size() * 10); // 预分配空间，每个段生成约10个点
+    path_bezier.reserve(path.size() * 10);
 
     int count_bezier = 0;
     const int n = path.size() - 1;
-    const int length_bezier = 5; // 固定为5阶贝塞尔曲线
+    const int length_bezier = 5;
 
-    // 主循环：分段生成5阶贝塞尔曲线
     while (count_bezier < n - 10 * span_bezier) {
         for (float t = 0.0; t <= 1.0; t += dt) {
             geometry_msgs::PoseStamped point_bezier;
@@ -114,9 +113,9 @@ void GlobalPlanner::smoothPathWithBezier(std::vector<geometry_msgs::PoseStamped>
             point_bezier.pose.position.x = 0.0;
             point_bezier.pose.position.y = 0.0;
             point_bezier.pose.position.z = 0.0;
-            point_bezier.pose.orientation = path[count_bezier].pose.orientation; // 默认继承起点朝向
+            point_bezier.pose.orientation = path[count_bezier].pose.orientation;
 
-            // 计算5阶贝塞尔曲线点
+
             for (int i = 0; i <= length_bezier; i++) {
                 double k = fac(length_bezier) / (fac(i) * fac(length_bezier - i)) *
                            pow(t, i) * pow(1 - t, length_bezier - i);
@@ -138,39 +137,6 @@ void GlobalPlanner::smoothPathWithBezier(std::vector<geometry_msgs::PoseStamped>
     path = std::move(path_bezier);
 }
 
-//void GlobalPlanner::smoothPathWithBezier(std::vector<geometry_msgs::PoseStamped>& path, int num_points) {
-//    if (path.size() < 4) {
-//        ROS_WARN("Path has fewer than 4 points, skipping Bezier smoothing.");
-//        return;
-//    }
-//
-//    std::vector<geometry_msgs::PoseStamped> smoothed_path;
-//    smoothed_path.reserve((path.size() - 1) * num_points);
-//
-//    // 每四个点一组进行三次贝塞尔曲线平滑
-//    for (size_t i = 0; i < path.size() - 3; i += 3) {
-//        const auto& p0 = path[i];
-//        const auto& p1 = path[i + 1];
-//        const auto& p2 = path[i + 2];
-//        const auto& p3 = path[i + 3];
-//
-//        // 在每个段内生成 num_points 个点
-//        for (int j = 0; j < num_points; ++j) {
-//            double t = static_cast<double>(j) / (num_points - 1);
-//            geometry_msgs::PoseStamped point = calculateBezierPoint(t, p0, p1, p2, p3);
-//            smoothed_path.push_back(point);
-//        }
-//    }
-
-//    // solve the left points（add them to smoothed_path directly）
-//    if (path.size() % 3 != 1) {
-//        for (size_t i = (path.size() - 4) - (path.size() - 4) % 3 + 3; i < path.size(); ++i) {
-//            smoothed_path.push_back(path[i]);
-//        }
-//    }
-//
-//    path = std::move(smoothed_path);
-//}
 
 void GlobalPlanner::outlineMap(unsigned char* costarr, int nx, int ny, unsigned char value) {
     unsigned char* pc = costarr;
@@ -256,6 +222,7 @@ void GlobalPlanner::initialize(std::string name, costmap_2d::Costmap2D* costmap,
 
         orientation_filter_ = new OrientationFilter();
 
+        raw_plan_pub_ = private_nh.advertise<nav_msgs::Path>("raw_plan", 1);
         plan_pub_ = private_nh.advertise<nav_msgs::Path>("plan", 1);
         potential_pub_ = private_nh.advertise<nav_msgs::OccupancyGrid>("potential", 1);
 
@@ -273,6 +240,11 @@ void GlobalPlanner::initialize(std::string name, costmap_2d::Costmap2D* costmap,
         dynamic_reconfigure::Server<global_planner::GlobalPlannerConfig>::CallbackType cb =
                 [this](auto& config, auto level){ reconfigureCB(config, level); };
         dsrv_->setCallback(cb);
+
+        //SG smoother parameters
+        sg_smoother_.initialize(private_nh, name + "/sg_smoother");
+        private_nh.param("use_sg_smoothing", use_sg_smoothing_, true);
+        private_nh.param("sg_max_time", sg_max_time_, 1.0);
 
         initialized_ = true;
     } else
@@ -427,6 +399,24 @@ bool GlobalPlanner::makePlan(const geometry_msgs::PoseStamped& start, const geom
             goal_copy.header.stamp = ros::Time::now();
             plan.push_back(goal_copy);
 
+            // save raw plan
+            std::vector<geometry_msgs::PoseStamped> raw_plan = plan;
+            publishPlan(raw_plan, true);
+
+            // convert it to support SG smooth
+            use_sg_smoothing_ = true;
+            if (use_sg_smoothing_) {
+                nav_msgs::Path path_msg;
+                path_msg.header = plan[0].header;
+                path_msg.poses = plan;
+                if (!sg_smoother_.smooth(path_msg, sg_max_time_)) {
+                    ROS_WARN("SG smoothing failed!");
+                }
+                plan = path_msg.poses;
+            }
+
+
+            // bezier smooth
             smoothPathWithBezier(plan, 5, 0.1);
         } else {
             ROS_ERROR("Failed to get a plan from potential when a legal potential was found. This shouldn't happen.");
@@ -438,13 +428,14 @@ bool GlobalPlanner::makePlan(const geometry_msgs::PoseStamped& start, const geom
     // add orientations if needed
     orientation_filter_->processPath(start, plan);
 
+
     //publish the plan for visualization purposes
-    publishPlan(plan);
+    publishPlan(plan, false);
     delete[] potential_array_;
     return !plan.empty();
 }
 
-void GlobalPlanner::publishPlan(const std::vector<geometry_msgs::PoseStamped>& path) {
+void GlobalPlanner::publishPlan(const std::vector<geometry_msgs::PoseStamped>& path, bool is_raw) {
     if (!initialized_) {
         ROS_ERROR(
                 "This planner has not been initialized yet, but it is being used, please call initialize() before use");
@@ -458,12 +449,21 @@ void GlobalPlanner::publishPlan(const std::vector<geometry_msgs::PoseStamped>& p
     gui_path.header.frame_id = frame_id_;
     gui_path.header.stamp = ros::Time::now();
 
-    // Extract the plan in world co-ordinates, we assume the path is all in the same frame
+//    // Extract the plan in world co-ordinates, we assume the path is all in the same frame
     for (unsigned int i = 0; i < path.size(); i++) {
         gui_path.poses[i] = path[i];
     }
+//
+//    plan_pub_.publish(gui_path);
+//    gui_path.poses = path;
 
-    plan_pub_.publish(gui_path);
+    if (is_raw) {
+        raw_plan_pub_.publish(gui_path);
+        ROS_INFO("Published raw plan with %zu poses", path.size());
+    } else {
+        plan_pub_.publish(gui_path);
+        ROS_INFO("Published final plan with %zu poses", path.size());
+    }
 }
 
 bool GlobalPlanner::getPlanFromPotential(double start_x, double start_y, double goal_x, double goal_y,
